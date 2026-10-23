@@ -1035,7 +1035,8 @@ function render(entity, pass, par3) {
               }
               switchMarkerData.put(entity, switchMarkerList);
             } else {
-              var rps = aroundRailData.tile.getRailCore().getRailPositions();
+              var core = aroundRailData.tile.getRailCore();
+              var rps = getLogicalRailPositions(core);
               var startRP = rps[0];
               var endRP = rps[1];
               var straightPitch = new Vec3(
@@ -1048,17 +1049,17 @@ function render(entity, pass, par3) {
                 isKaizPatch || !isOldVer ? startRP.anchorPitch : straightPitch;
               var endAnchorPitch =
                 isKaizPatch || !isOldVer ? endRP.anchorPitch : straightPitch;
+              var logicalMap = getLogicalRailMapBasic(core);
               if (
                 startAnchorPitch === 0 &&
                 endAnchorPitch === 0 &&
                 startRP.posY !== endRP.posY &&
                 (isKaizPatch || !isOldVer) &&
-                aroundRailData.tile.getRailMap(null)
+                logicalMap
               ) {
                 //縦曲線未設定による代替処理
-                var railMap = aroundRailData.tile.getRailMap(null);
-                var split = Math.floor(railMap.getLength() * 2);
-                startAnchorPitch = railMap.getRailPitch(split, 0);
+                var split = Math.floor(logicalMap.getLength() * 2);
+                startAnchorPitch = logicalMap.getRailPitch(split, 0);
                 endAnchorPitch = -startAnchorPitch;
               }
               //始点
@@ -1284,8 +1285,8 @@ function render(entity, pass, par3) {
             !splitRailList &&
             !isSwitchRail(aroundRailData.tile)
           ) {
-            var railMaps = getAllRailMapsFromTile(aroundRailData.tile);
-            var railMap = railMaps.length !== 0 ? railMaps[0] : null;
+            var core = aroundRailData.tile.getRailCore();
+            var railMap = getLogicalRailMapBasic(core);
             var startRP = railMap ? railMap.getStartRP() : null;
             var endRP = railMap ? railMap.getEndRP() : null;
             var snapPosList = getSplitPosList(railMap, railPosAccuracy);
@@ -1315,10 +1316,9 @@ function render(entity, pass, par3) {
                 endAnchorPitch === 0 &&
                 startRP.posY !== endRP.posY &&
                 (isKaizPatch || !isOldVer) &&
-                aroundRailData.tile.getRailMap(null)
+                railMap
               ) {
                 //縦曲線未設定による代替処理
-                var railMap = aroundRailData.tile.getRailMap(null);
                 var split = Math.floor(railMap.getLength() * 2);
                 startAnchorPitch = railMap.getRailPitch(split, 0);
                 endAnchorPitch = -startAnchorPitch;
@@ -2439,13 +2439,19 @@ function render(entity, pass, par3) {
         !isUnavailableSelect
       ) {
         if (isSwitchRail(aroundRailData.tile)) {
-          var railMaps = getAllRailMapsFromTile(aroundRailData.tile);
+          var railMaps = getAllRailMapsForLogicalRail(
+            world,
+            aroundRailData.tile
+          );
           for (var i = 0; i < railMaps.length; i++) {
             renderCurveFromRailMap(deleteLine, railMaps[i], posX, posY, posZ);
           }
         } else {
-          var railMap = aroundRailData.tile.getRailMap(null);
-          renderCurveFromRailMap(deleteLine, railMap, posX, posY, posZ);
+          var core = aroundRailData.tile.getRailCore();
+          var railMap = getLogicalRailMapBasic(core);
+          if (railMap) {
+            renderCurveFromRailMap(deleteLine, railMap, posX, posY, posZ);
+          }
         }
       }
 
@@ -2459,8 +2465,8 @@ function render(entity, pass, par3) {
         !splitRailList &&
         !isSwitchRail(aroundRailData.tile)
       ) {
-        var railMaps = getAllRailMapsFromTile(aroundRailData.tile);
-        var railMap = railMaps.length !== 0 ? railMaps[0] : null;
+        var core = aroundRailData.tile.getRailCore();
+        var railMap = getLogicalRailMapBasic(core);
         var snapPosList = getSplitPosList(railMap, railPosAccuracy);
         var splitPos = getNearestPosFromList(
           snapPosList,
@@ -3652,7 +3658,76 @@ function getAllRailMapsFromTile(tile) {
     var core = tile.getRailCore();
     if (core) return core.getAllRailMaps() || [];
   }
+  if (tile && typeof tile.getAllRailMaps === "function") {
+    return tile.getAllRailMaps() || [];
+  }
   return [];
+}
+
+// SectionCore かどうか
+function isRailSectionCore(core) {
+  if (!core) return false;
+  try {
+    return typeof core.isRailSection === "function" && core.isRailSection();
+  } catch (e) {
+    return false;
+  }
+}
+
+// 論理レール全体の起終点を返す
+function getLogicalRailPositions(core) {
+  if (isRailSectionCore(core)) {
+    return core.getLogicalRailPositions();
+  }
+  return core.getRailPositions();
+}
+
+// 同じ論理レールに属する全 SectionCore を返す
+function getRailGroupCores(world, core) {
+  if (!isRailSectionCore(core)) return [core];
+  var positions = core.getRailGroupCorePositions();
+  var result = [];
+  for (var i = 0; i < positions.size(); i++) {
+    var p = positions.get(i);
+    var tile = getTileEntity(world, p[0], p[1], p[2]);
+    if (tile instanceof TileEntityLargeRailBase) {
+      var c = tile.getRailCore();
+      if (c && c.isSameLogicalRail(core)) result.push(c);
+    }
+  }
+  if (result.indexOf(core) === -1) result.push(core);
+  return result;
+}
+
+// 論理レール全体の RailMap 一覧
+function getAllRailMapsForLogicalRail(world, tile) {
+  var core = tile.getRailCore();
+  if (!isRailSectionCore(core)) return getAllRailMapsFromTile(tile);
+  var result = [];
+  var cores = getRailGroupCores(world, core);
+  for (var i = 0; i < cores.length; i++) {
+    var maps = cores[i].getAllRailMaps() || [];
+    for (var j = 0; j < maps.length; j++) {
+      if (result.indexOf(maps[j]) === -1) result.push(maps[j]);
+    }
+  }
+  return result;
+}
+
+function getLogicalRailMapBasic(core) {
+  if (!isRailSectionCore(core)) {
+    return core.getRailMap(null);
+  }
+  var logical = core.getLogicalRailPositions();
+  try {
+    return new RailMapBasic(logical[0], logical[1], core.fixRTMRailMapVersion);
+  } catch (e) {
+    try {
+      return new RailMapBasic(logical[0], logical[1]);
+    } catch (e2) {
+      return null;
+    }
+  }
 }
 
 //TileEntityのBlock座標を取得する
@@ -3727,9 +3802,11 @@ function getAroundRailData(world, x, y, z) {
         }
       } else {
         //直線レール
-        if (!tileCore.getRailPositions()) return null;
-        var startRP = tileCore.getRailPositions()[0];
-        var endRP = tileCore.getRailPositions()[1];
+        var core = tileCore;
+        var rps = getLogicalRailPositions(core);
+        if (!rps || rps.length < 2) return null;
+        var startRP = rps[0];
+        var endRP = rps[1];
         var startRPDistance = getDistanceSq(
           x,
           y,
@@ -4044,7 +4121,7 @@ function getAnchorLengthFromDirectMarker(startMarker, endMarker) {
 //x, y, zから一番近いRailPositionとそれに付帯するRailMapを返す
 function getNearestRPAndRM(world, tile, x, y, z) {
   var tileCore = tile.getRailCore();
-  var railMapList = getAllRailMapsFromTile(tileCore);
+  var railMapList = tileCore.getAllRailMaps() || [];
   var railPosition = null;
   var railMap = null;
   if (railMapList.length > 1) {
@@ -4071,7 +4148,7 @@ function getNearestRPAndRM(world, tile, x, y, z) {
     railMap = nearestPoint.getActiveRailMap(world);
   } else if (railMapList.length === 1) {
     //直線レール
-    var rps = tileCore.getRailPositions();
+    var rps = getLogicalRailPositions(tileCore);
     var rp0Distance = getDistanceSq(
       rps[0].posX,
       rps[0].posY,
@@ -4089,7 +4166,8 @@ function getNearestRPAndRM(world, tile, x, y, z) {
       z
     );
     railPosition = rp0Distance < rp1Distance ? rps[0] : rps[1];
-    railMap = railMapList[0];
+    var logicalMap = getLogicalRailMapBasic(tileCore);
+    railMap = logicalMap !== null ? logicalMap : railMapList[0];
   }
   return {
     railPosition: railPosition,
@@ -4295,7 +4373,8 @@ function createTransitionCurveBezier(startMarker, endMarker, world) {
       connectRailTile instanceof TileEntityLargeRailBase &&
       getAllRailMapsFromTile(connectRailTile)
     ) {
-      var connectRPs = connectRailTile.getRailCore().getRailPositions();
+      var connectCore = connectRailTile.getRailCore();
+      var connectRPs = getLogicalRailPositions(connectCore);
       var connectStartRP = connectRPs[0];
       var connectStartYaw =
         isKaizPatch || !isOldVer
@@ -4317,10 +4396,11 @@ function createTransitionCurveBezier(startMarker, endMarker, world) {
         connectEndYaw
       );
       var radius = connectCurveData.radius;
+      var sectionRPs = connectCore.getRailPositions();
       var hasCoreTile =
-        connectPos.x === connectStartRP.blockX &&
-        connectPos.y === connectStartRP.blockY &&
-        connectPos.z === connectStartRP.blockZ;
+        connectPos.x === sectionRPs[0].blockX &&
+        connectPos.y === sectionRPs[0].blockY &&
+        connectPos.z === sectionRPs[0].blockZ;
       if (radius !== Infinity) {
         //接続する線路がカーブしている
         //タイルが接続側にある→逆順
